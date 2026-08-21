@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>AR.js 動作確認テスト</title>
+<script src="https://aframe.io/releases/1.4.0/aframe.min.js"></script>
+<script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js"></script>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  #startOverlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(20,20,20,0.95);
+    color: white;
+    z-index: 5000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 20px;
+    box-sizing: border-box;
+  }
+  #startBtn {
+    margin-top: 20px;
+    padding: 16px 32px;
+    font-size: 18px;
+    background: #2a7fff;
+    color: white;
+    border: none;
+    border-radius: 8px;
+  }
+  #infoPanel {
+    position: fixed;
+    top: 10px;
+    left: 10px;
+    z-index: 1000;
+    background: rgba(0,0,0,0.6);
+    color: white;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    max-width: 260px;
+    line-height: 1.5;
+    display: none;
+  }
+  #errorLog {
+    position: fixed;
+    bottom: 10px;
+    left: 10px;
+    right: 10px;
+    z-index: 2000;
+    background: rgba(255,240,240,0.95);
+    border: 1px solid #d33;
+    color: #900;
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-family: monospace;
+    max-height: 30vh;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    display: none;
+  }
+</style>
+</head>
+<body>
+
+<div id="startOverlay">
+  <h2>AR動作確認テスト</h2>
+  <p>カメラと位置情報、モーションセンサーへのアクセスを許可してください。<br>
+  自分の現在地の北側 約30m の位置に赤いボックスが表示されるはずです。</p>
+  <button id="startBtn">ARを開始する</button>
+</div>
+
+<div id="infoPanel">
+  <div id="gpsStatus">GPS: 待機中</div>
+  <div id="objStatus">オブジェクト: 未配置</div>
+</div>
+
+<div id="errorLog"></div>
+
+<script>
+  var errorLogEl;
+  function logError(msg) {
+    if (!errorLogEl) errorLogEl = document.getElementById('errorLog');
+    errorLogEl.style.display = 'block';
+    errorLogEl.textContent += msg + "\n\n";
+  }
+  window.addEventListener('error', function(e) {
+    var detail = e.message;
+    if (e.filename) detail += "\n  at " + e.filename + ":" + e.lineno;
+    logError("[window error] " + detail);
+  });
+
+  // 緯度経度から「北にNメートル」の地点を計算する簡易関数
+  function destinationPoint(lat, lng, distanceMeters, bearingDeg) {
+    var R = 6378137; // 地球半径(m)
+    var bearing = bearingDeg * Math.PI / 180;
+    var latRad = lat * Math.PI / 180;
+    var lngRad = lng * Math.PI / 180;
+
+    var newLat = Math.asin(
+      Math.sin(latRad) * Math.cos(distanceMeters / R) +
+      Math.cos(latRad) * Math.sin(distanceMeters / R) * Math.cos(bearing)
+    );
+    var newLng = lngRad + Math.atan2(
+      Math.sin(bearing) * Math.sin(distanceMeters / R) * Math.cos(latRad),
+      Math.cos(distanceMeters / R) - Math.sin(latRad) * Math.sin(newLat)
+    );
+
+    return { lat: newLat * 180 / Math.PI, lng: newLng * 180 / Math.PI };
+  }
+
+  document.getElementById('startBtn').addEventListener('click', function() {
+    var overlay = document.getElementById('startOverlay');
+    var infoPanel = document.getElementById('infoPanel');
+
+    function proceedToGPS() {
+      infoPanel.style.display = 'block';
+      overlay.style.display = 'none';
+
+      if (!navigator.geolocation) {
+        logError("このブラウザは位置情報(Geolocation API)に対応していません。");
+        return;
+      }
+
+      navigator.geolocation.getCurrentPosition(function(pos) {
+        var lat = pos.coords.latitude;
+        var lng = pos.coords.longitude;
+        document.getElementById('gpsStatus').textContent =
+          "GPS: " + lat.toFixed(6) + ", " + lng.toFixed(6);
+
+        // 自分の位置の北 30m の地点を計算
+        var target = destinationPoint(lat, lng, 30, 0);
+
+        // A-Frameシーンを動的に構築
+        var sceneHTML =
+          '<a-scene vr-mode-ui="enabled: false" arjs="sourceType: webcam; videoTexture: true; debugUIEnabled: false;">' +
+          '  <a-box position="0 0 0" material="color: red; opacity: 0.85" scale="5 5 5" ' +
+          '    gps-new-entity-place="latitude: ' + target.lat + '; longitude: ' + target.lng + ';">' +
+          '  </a-box>' +
+          '  <a-entity camera gps-new-camera="gpsMinDistance: 5"></a-entity>' +
+          '</a-scene>';
+
+        document.body.insertAdjacentHTML('beforeend', sceneHTML);
+        document.getElementById('objStatus').textContent =
+          "オブジェクト: 北 30m地点に配置済み (" + target.lat.toFixed(6) + ", " + target.lng.toFixed(6) + ")";
+
+      }, function(err) {
+        logError("[Geolocation error] " + err.message);
+        document.getElementById('gpsStatus').textContent = "GPS: 取得失敗 - " + err.message;
+      }, {
+        enableHighAccuracy: true,
+        timeout: 10000
+      });
+    }
+
+    // iOS 13+ ではDeviceOrientationEventの許可が必要
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      DeviceOrientationEvent.requestPermission().then(function(response) {
+        if (response === 'granted') {
+          proceedToGPS();
+        } else {
+          logError("モーションセンサーの許可が得られませんでした。設定アプリ > Safari > モーションと画面の向きへのアクセス を確認してください。");
+        }
+      }).catch(function(err) {
+        logError("[DeviceOrientation permission error] " + err.message);
+      });
+    } else {
+      // Android等、許可リクエストが不要な環境
+      proceedToGPS();
+    }
+  });
+</script>
+
+</body>
+</html>
