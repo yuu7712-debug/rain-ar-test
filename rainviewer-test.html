@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RainViewer API テスト - 雨雲レーダー表示</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  #map {
+    width: 100%;
+    height: 100%;
+  }
+  #panel {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    z-index: 1000;
+    background: rgba(255,255,255,0.95);
+    padding: 10px 14px;
+    border-radius: 8px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+    font-size: 13px;
+    max-width: 260px;
+    line-height: 1.5;
+  }
+  #panel h1 {
+    font-size: 14px;
+    margin: 0 0 6px 0;
+  }
+  #status {
+    color: #555;
+    font-size: 12px;
+    margin-top: 6px;
+  }
+  #opacityRow {
+    margin-top: 8px;
+  }
+  #opacityRow label {
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+
+<div id="panel">
+  <h1>雨雲レーダー (RainViewer API)</h1>
+  <div id="status">読み込み中...</div>
+  <div id="opacityRow">
+    <label>不透明度: <input type="range" id="opacitySlider" min="0" max="100" value="70"></label>
+  </div>
+</div>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+  // 初期表示位置: 気仙沼周辺
+  var initialLat = 38.9086;
+  var initialLng = 141.5697;
+
+  var map = L.map('map').setView([initialLat, initialLng], 9);
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; OpenStreetMap contributors',
+    maxZoom: 12
+  }).addTo(map);
+
+  var statusEl = document.getElementById('status');
+  var radarLayer = null;
+
+  var API_URL = "https://api.rainviewer.com/public/weather-maps.json";
+  var TILE_SIZE = 256;
+  var COLOR_SCHEME = 4; // 4 = Universal Blue系（見やすい配色の一つ）
+  var OPTIONS = "1_1"; // smooth=1, snow=1
+
+  function loadRadar() {
+    statusEl.textContent = "RainViewer APIからデータ取得中...";
+
+    fetch(API_URL)
+      .then(function(res) {
+        if (!res.ok) throw new Error("APIレスポンスエラー: " + res.status);
+        return res.json();
+      })
+      .then(function(data) {
+        var host = data.host;
+        var pastFrames = data.radar && data.radar.past;
+
+        if (!pastFrames || pastFrames.length === 0) {
+          statusEl.textContent = "利用可能なレーダーフレームがありません。";
+          return;
+        }
+
+        // 最新（一番直近）のフレームを使う
+        var latestFrame = pastFrames[pastFrames.length - 1];
+        var tileUrl = host + latestFrame.path + '/' + TILE_SIZE + '/{z}/{x}/{y}/' + COLOR_SCHEME + '/' + OPTIONS + '.png';
+
+        if (radarLayer) {
+          map.removeLayer(radarLayer);
+        }
+
+        radarLayer = L.tileLayer(tileUrl, {
+          opacity: 0.7,
+          zIndex: 10
+        }).addTo(map);
+
+        var frameTime = new Date(latestFrame.time * 1000);
+        statusEl.textContent = "表示中のデータ時刻: " + frameTime.toLocaleString('ja-JP');
+      })
+      .catch(function(err) {
+        statusEl.textContent = "エラー: " + err.message;
+        console.error(err);
+      });
+  }
+
+  document.getElementById('opacitySlider').addEventListener('input', function(e) {
+    if (radarLayer) {
+      radarLayer.setOpacity(e.target.value / 100);
+    }
+  });
+
+  loadRadar();
+
+  // 5分ごとに自動更新（RainViewerのデータ更新頻度に合わせる）
+  setInterval(loadRadar, 5 * 60 * 1000);
+</script>
+
+</body>
+</html>
