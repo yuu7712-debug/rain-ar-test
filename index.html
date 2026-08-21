@@ -44,6 +44,24 @@
   #opacityRow label {
     font-size: 12px;
   }
+  #errorLog {
+    position: absolute;
+    bottom: 10px;
+    left: 10px;
+    right: 10px;
+    z-index: 2000;
+    background: #fff3f3;
+    border: 1px solid #d33;
+    color: #900;
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-family: monospace;
+    max-height: 40vh;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    display: none;
+  }
 </style>
 </head>
 <body>
@@ -57,9 +75,36 @@
 </div>
 
 <div id="map"></div>
+<div id="errorLog"></div>
+
+<script>
+  // 画面上にエラーを表示するデバッグ用ハンドラ
+  var errorLogEl;
+  function logError(msg) {
+    if (!errorLogEl) errorLogEl = document.getElementById('errorLog');
+    errorLogEl.style.display = 'block';
+    errorLogEl.textContent += msg + "\n\n";
+  }
+  window.addEventListener('error', function(e) {
+    var detail = e.message;
+    if (e.filename) detail += "\n  at " + e.filename + ":" + e.lineno + ":" + e.colno;
+    if (e.error && e.error.stack) detail += "\n  stack: " + e.error.stack;
+    logError("[window error] " + detail);
+  });
+  window.addEventListener('unhandledrejection', function(e) {
+    logError("[unhandled promise rejection] " + (e.reason && e.reason.message ? e.reason.message : JSON.stringify(e.reason)));
+  });
+</script>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
+  // Leafletがそもそも読み込めているか確認
+  if (typeof L === 'undefined') {
+    logError("Leaflet(L)が読み込まれていません。CDNへの接続がブロックされている可能性があります。");
+    document.getElementById('status').textContent = "エラー: Leafletライブラリの読み込みに失敗しました。";
+    throw new Error("Leaflet not loaded");
+  }
+
   // 初期表示位置: 気仙沼周辺
   var initialLat = 38.9086;
   var initialLng = 141.5697;
@@ -68,7 +113,7 @@
 
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap contributors',
-    maxZoom: 12
+    maxZoom: 19
   }).addTo(map);
 
   var statusEl = document.getElementById('status');
@@ -106,7 +151,9 @@
 
         radarLayer = L.tileLayer(tileUrl, {
           opacity: 0.7,
-          zIndex: 10
+          zIndex: 10,
+          maxNativeZoom: 7,  // RainViewerタイルの提供上限はズーム7
+          maxZoom: 18        // それ以上は7の画像を引き伸ばして表示する
         }).addTo(map);
 
         var frameTime = new Date(latestFrame.time * 1000);
@@ -114,6 +161,7 @@
       })
       .catch(function(err) {
         statusEl.textContent = "エラー: " + err.message;
+        logError("[fetch error] " + err.message + (err.stack ? "\n" + err.stack : ""));
         console.error(err);
       });
   }
