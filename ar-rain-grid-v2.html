@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>AR 雨雲レーダー広域表示テスト</title>
+<script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+<script type='text/javascript' src='https://raw.githack.com/AR-js-org/AR.js/3.4.7/three.js/build/ar-threex-location-only.js'></script>
+<script type='text/javascript' src='https://raw.githack.com/AR-js-org/AR.js/3.4.7/aframe/build/aframe-ar.js'></script>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  #startOverlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(20,20,20,0.95);
+    color: white;
+    z-index: 5000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 20px;
+    box-sizing: border-box;
+  }
+  #startBtn {
+    margin-top: 20px;
+    padding: 16px 32px;
+    font-size: 18px;
+    background: #2a7fff;
+    color: white;
+    border: none;
+    border-radius: 8px;
+  }
+  #logPanel {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 3000;
+    background: rgba(0,0,0,0.75);
+    color: #0f0;
+    padding: 6px 8px;
+    font-size: 10px;
+    font-family: monospace;
+    max-height: 35vh;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+  #logPanel .err { color: #f66; }
+  #logPanel .info { color: #6cf; }
+</style>
+</head>
+<body>
+
+<div id="startOverlay">
+  <h2>AR 雨雲レーダー広域表示テスト</h2>
+  <p>現在地を中心に、周囲のレーダータイルをグリッド状に並べて表示します。</p>
+  <button id="startBtn">ARを開始する</button>
+</div>
+
+<div id="logPanel"></div>
+
+<script>
+  var logEl = document.getElementById('logPanel');
+  function log(msg, cls) {
+    var line = document.createElement('div');
+    if (cls) line.className = cls;
+    var t = new Date();
+    var ts = t.toTimeString().split(' ')[0] + '.' + String(t.getMilliseconds()).padStart(3,'0');
+    line.textContent = '[' + ts + '] ' + msg;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  window.addEventListener('error', function(e) {
+    var detail = e.message;
+    if (e.filename) detail += " @" + e.filename.split('/').pop() + ":" + e.lineno;
+    log("[JS ERROR] " + detail, 'err');
+  });
+  window.addEventListener('unhandledrejection', function(e) {
+    log("[PROMISE REJECTION] " + (e.reason && e.reason.message ? e.reason.message : JSON.stringify(e.reason)), 'err');
+  });
+
+  // 緯度経度 → タイル座標 (小数含む、正確な位置計算用)
+  function lonLatToTileFloat(lon, lat, zoom) {
+    var latRad = lat * Math.PI / 180;
+    var n = Math.pow(2, zoom);
+    var x = (lon + 180) / 360 * n;
+    var y = (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n;
+    return { x: x, y: y };
+  }
+
+  // タイル座標(整数) → そのタイル左上の緯度経度
+  function tileToLonLat(x, y, zoom) {
+    var n = Math.pow(2, zoom);
+    var lon = x / n * 360 - 180;
+    var latRad = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n)));
+    var lat = latRad * 180 / Math.PI;
+    return { lon: lon, lat: lat };
+  }
+
+  log("ページ読み込み完了。AFRAME loaded=" + (typeof AFRAME !== 'undefined'));
+
+  document.getElementById('startBtn').addEventListener('click', function() {
+    var overlay = document.getElementById('startOverlay');
+
+    function proceedToAR() {
+      overlay.style.display = 'none';
+      log("AR開始処理を実行します");
+
+      var sceneHTML =
+        '<a-scene vr-mode-ui="enabled: false" arjs="sourceType: webcam; videoTexture: true; debugUIEnabled: false" renderer="antialias: true; alpha: true">' +
+        '  <a-camera gps-new-camera="gpsMinDistance: 5"></a-camera>' +
+        '</a-scene>';
+      document.body.insertAdjacentHTML('beforeend', sceneHTML);
+      log("a-sceneをDOMに追加しました");
+
+      var gridBuilt = false;
+      var checkInterval = setInterval(function() {
+        var camEl = document.querySelector("[gps-new-camera]");
+        if (!camEl) return;
+        clearInterval(checkInterval);
+        log("gps-new-camera 要素を発見。イベント登録します");
+
+        camEl.addEventListener("gps-camera-update-position", function(e) {
+          var lat = e.detail.position.latitude;
+          var lon = e.detail.position.longitude;
+          log("GPS位置取得: lat=" + lat.toFixed(6) + " lon=" + lon.toFixed(6), 'info');
+
+          if (gridBuilt) return;
+          gridBuilt = true;
+
+          fetch("https://api.rainviewer.com/public/weather-maps.json")
+            .then(function(res) { return res.json(); })
+            .then(function(data) {
+              var host = data.host;
+              var pastFrames = data.radar && data.radar.past;
+              if (!pastFrames || pastFrames.length === 0) {
+                log("RainViewerに利用可能なフレームがありません", 'err');
+                return;
+              }
+              var latestFrame = pastFrames[pastFrames.length - 1];
+              log("RainViewer最新フレーム取得: " + new Date(latestFrame.time * 1000).toLocaleString('ja-JP'), 'info');
+
+              // ズームレベルを上げて解像度を確保（7が上限なのでそのまま使用）
+              var zoom = 7;
+              var centerTileFloat = lonLatToTileFloat(lon, lat, zoom);
+              var centerX = Math.floor(centerTileFloat.x);
+              var centerY = Math.floor(centerTileFloat.y);
+              log("中心タイル座標: x=" + centerX + " y=" + centerY + " z=" + zoom, 'info');
+
+              // 1タイルあたりの実サイズ(メートル)を計算
+              // ズーム7でのタイル1個分の経度差
+              var n = Math.pow(2, zoom);
+              var tileLonSpan = 360 / n;
+              var metersPerDegreeLon = 111320 * Math.cos(lat * Math.PI / 180);
+              var tileWidthMeters = tileLonSpan * metersPerDegreeLon;
+              log("1タイルの実サイズ: 約" + Math.round(tileWidthMeters) + "m四方", 'info');
+
+              var sceneEl = document.querySelector('a-scene');
+              var gridRadius = 0; // まずは中心の1枚だけで検証（0=1x1グリッド）
+              var displaySizeMeters = 200; // 実際のタイル範囲は無視し、見やすい固定サイズで表示
+              var tileCount = 0;
+              var loadedCount = 0;
+
+              for (var dx = -gridRadius; dx <= gridRadius; dx++) {
+                for (var dy = -gridRadius; dy <= gridRadius; dy++) {
+                  var tx = centerX + dx;
+                  var ty = centerY + dy;
+
+                  // タイルの中心緯度経度を計算(タイル左上と右下の中間)
+                  var topLeft = tileToLonLat(tx, ty, zoom);
+                  var bottomRight = tileToLonLat(tx + 1, ty + 1, zoom);
+                  var tileCenterLon = (topLeft.lon + bottomRight.lon) / 2;
+                  var tileCenterLat = (topLeft.lat + bottomRight.lat) / 2;
+
+                  var tileUrl = host + latestFrame.path + '/256/' + zoom + '/' + tx + '/' + ty + '/4/1_1.png';
+
+                  var entity = document.createElement("a-entity");
+                  entity.setAttribute('gps-new-entity-place', {
+                    latitude: lat + 0.001, // 現在地の北 約100m地点（確実に見える位置）
+                    longitude: lon
+                  });
+
+                  var plane = document.createElement("a-plane");
+                  plane.setAttribute("width", displaySizeMeters);
+                  plane.setAttribute("height", displaySizeMeters);
+                  plane.setAttribute("material", "src: " + tileUrl + "; transparent: true; opacity: 0.85; side: double");
+                  plane.setAttribute("position", "0 " + (displaySizeMeters / 2) + " 0"); // 地表に立てて中心が見やすい高さ
+
+                  (function(txx, tyy) {
+                    plane.addEventListener('materialtextureloaded', function() {
+                      loadedCount++;
+                      log("タイル(" + txx + "," + tyy + ")読み込み成功 [" + loadedCount + "/" + tileCount + "]", 'info');
+                    });
+                  })(tx, ty);
+
+                  entity.appendChild(plane);
+                  sceneEl.appendChild(entity);
+                  tileCount++;
+                }
+              }
+              log(tileCount + "枚のタイルをグリッド配置しました（3x3）", 'info');
+            })
+            .catch(function(err) {
+              log("[RainViewer fetch error] " + err.message, 'err');
+            });
+        });
+      }, 300);
+    }
+
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      DeviceOrientationEvent.requestPermission().then(function(response) {
+        log("DeviceOrientationEvent permission: " + response);
+        if (response === 'granted') {
+          proceedToAR();
+        } else {
+          log("モーションセンサーの許可が拒否されました", 'err');
+        }
+      }).catch(function(err) {
+        log("[DeviceOrientation permission error] " + err.message, 'err');
+      });
+    } else {
+      proceedToAR();
+    }
+  });
+</script>
+
+</body>
+</html>
