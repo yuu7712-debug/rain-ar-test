@@ -4,8 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>AR.js 動作確認テスト</title>
-<script src="https://aframe.io/releases/1.4.0/aframe.min.js"></script>
-<script src="https://raw.githack.com/AR-js-org/AR.js/master/aframe/build/aframe-ar.js"></script>
+<script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+<script type='text/javascript' src='https://raw.githack.com/AR-js-org/AR.js/3.4.7/three.js/build/ar-threex-location-only.js'></script>
+<script type='text/javascript' src='https://raw.githack.com/AR-js-org/AR.js/3.4.7/aframe/build/aframe-ar.js'></script>
 <style>
   html, body {
     margin: 0;
@@ -138,16 +139,14 @@
         document.getElementById('gpsStatus').textContent =
           "GPS: " + lat.toFixed(6) + ", " + lng.toFixed(6);
 
-        // 自分の位置の北 30m の地点を計算
-        var target = destinationPoint(lat, lng, 30, 0);
+        // 自分の位置から緯度+0.001度(約100m北)の地点に配置（公式サンプル推奨の方式）
+        var target = { lat: lat + 0.001, lng: lng };
 
-        // A-Frameシーンを動的に構築
+        // A-Frameシーンを動的に構築（公式サンプル準拠）
         var sceneHTML =
-          '<a-scene vr-mode-ui="enabled: false" arjs="sourceType: webcam; videoTexture: true; debugUIEnabled: false;">' +
-          '  <a-box position="0 0 0" material="color: red; opacity: 0.85" scale="5 5 5" ' +
-          '    gps-new-entity-place="latitude: ' + target.lat + '; longitude: ' + target.lng + ';">' +
-          '  </a-box>' +
-          '  <a-entity camera gps-new-camera="gpsMinDistance: 5"></a-entity>' +
+          '<a-scene vr-mode-ui="enabled: false" arjs="sourceType: webcam; videoTexture: true; debugUIEnabled: false" renderer="antialias: true; alpha: true">' +
+          '  <a-camera gps-new-camera="gpsMinDistance: 5"></a-camera>' +
+          '  <a-box color="red" gps-new-entity-place="latitude: ' + target.lat + '; longitude: ' + target.lng + '" depth="10" height="10" width="10"></a-box>' +
           '</a-scene>';
 
         document.body.insertAdjacentHTML('beforeend', sceneHTML);
