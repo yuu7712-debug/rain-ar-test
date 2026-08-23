@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>AR 雨雲レーダー円柱配置テスト</title>
+<script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+<script type='text/javascript' src='https://raw.githack.com/AR-js-org/AR.js/3.4.7/three.js/build/ar-threex-location-only.js'></script>
+<script type='text/javascript' src='https://raw.githack.com/AR-js-org/AR.js/3.4.7/aframe/build/aframe-ar.js'></script>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  #startOverlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(20,20,20,0.95);
+    color: white;
+    z-index: 5000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 20px;
+    box-sizing: border-box;
+  }
+  #startBtn {
+    margin-top: 20px;
+    padding: 16px 32px;
+    font-size: 18px;
+    background: #2a7fff;
+    color: white;
+    border: none;
+    border-radius: 8px;
+  }
+  #logPanel {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 3000;
+    background: rgba(0,0,0,0.75);
+    color: #0f0;
+    padding: 6px 8px;
+    font-size: 10px;
+    font-family: monospace;
+    max-height: 35vh;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+  #logPanel .err { color: #f66; }
+  #logPanel .info { color: #6cf; }
+</style>
+</head>
+<body>
+
+<div id="startOverlay">
+  <h2>AR 雨雲レーダー円柱配置テスト</h2>
+  <p>自分を中心に、半径60km分の雨雲レーダーを8方向の扇形パネルとして周囲に配置します。<br>体を回転させると、その方角のパネルが見えます。</p>
+  <button id="startBtn">ARを開始する</button>
+</div>
+
+<div id="logPanel"></div>
+
+<script>
+  var logEl = document.getElementById('logPanel');
+  function log(msg, cls) {
+    var line = document.createElement('div');
+    if (cls) line.className = cls;
+    var t = new Date();
+    var ts = t.toTimeString().split(' ')[0] + '.' + String(t.getMilliseconds()).padStart(3,'0');
+    line.textContent = '[' + ts + '] ' + msg;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  window.addEventListener('error', function(e) {
+    var detail = e.message;
+    if (e.filename) detail += " @" + e.filename.split('/').pop() + ":" + e.lineno;
+    log("[JS ERROR] " + detail, 'err');
+  });
+  window.addEventListener('unhandledrejection', function(e) {
+    log("[PROMISE REJECTION] " + (e.reason && e.reason.message ? e.reason.message : JSON.stringify(e.reason)), 'err');
+  });
+
+  // 緯度経度 → タイル座標 (小数含む、正確な位置計算用)
+  function lonLatToTileFloat(lon, lat, zoom) {
+    var latRad = lat * Math.PI / 180;
+    var n = Math.pow(2, zoom);
+    var x = (lon + 180) / 360 * n;
+    var y = (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n;
+    return { x: x, y: y };
+  }
+
+  // タイル座標(整数) → そのタイル左上の緯度経度
+  function tileToLonLat(x, y, zoom) {
+    var n = Math.pow(2, zoom);
+    var lon = x / n * 360 - 180;
+    var latRad = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n)));
+    var lat = latRad * 180 / Math.PI;
+    return { lon: lon, lat: lat };
+  }
+
+  log("ページ読み込み完了。AFRAME loaded=" + (typeof AFRAME !== 'undefined'));
+
+  document.getElementById('startBtn').addEventListener('click', function() {
+    var overlay = document.getElementById('startOverlay');
+
+    function proceedToAR() {
+      overlay.style.display = 'none';
+      log("AR開始処理を実行します");
+
+      var sceneHTML =
+        '<a-scene vr-mode-ui="enabled: false" arjs="sourceType: webcam; videoTexture: true; debugUIEnabled: false" renderer="antialias: true; alpha: true; logarithmicDepthBuffer: true; precision: highp">' +
+        '  <a-camera gps-new-camera="gpsMinDistance: 5" far="50000" near="0.1"></a-camera>' +
+        '</a-scene>';
+      document.body.insertAdjacentHTML('beforeend', sceneHTML);
+      log("a-sceneをDOMに追加しました");
+
+      var gridBuilt = false;
+      var checkInterval = setInterval(function() {
+        var camEl = document.querySelector("[gps-new-camera]");
+        if (!camEl) return;
+        clearInterval(checkInterval);
+        log("gps-new-camera 要素を発見。イベント登録します");
+
+        // カメラの傾き（見上げ角度）を2秒おきにログ表示
+        setInterval(function() {
+          var rot = camEl.getAttribute('rotation');
+          if (rot) {
+            log("カメラ傾き: pitch(x)=" + rot.x.toFixed(1) + "° yaw(y)=" + rot.y.toFixed(1) + "°");
+          }
+        }, 2000);
+
+        // テスト用グリッド画像をCanvasで生成（RainViewerの代わりに使う）
+        function createGridTestImage() {
+          var canvas = document.createElement('canvas');
+          canvas.width = 512;
+          canvas.height = 512;
+          var ctx = canvas.getContext('2d');
+
+          // 背景を半透明の青にする
+          ctx.fillStyle = 'rgba(30, 100, 200, 0.4)';
+          ctx.fillRect(0, 0, 512, 512);
+
+          // グリッド線
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+          ctx.lineWidth = 3;
+          var step = 512 / 8; // 8x8マス
+          for (var i = 0; i <= 8; i++) {
+            ctx.beginPath();
+            ctx.moveTo(i * step, 0);
+            ctx.lineTo(i * step, 512);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(0, i * step);
+            ctx.lineTo(512, i * step);
+            ctx.stroke();
+          }
+
+          // 外枠を目立たせる（赤）
+          ctx.strokeStyle = 'rgba(255, 0, 0, 1)';
+          ctx.lineWidth = 10;
+          ctx.strokeRect(5, 5, 502, 502);
+
+          // 中央に文字
+          ctx.fillStyle = 'white';
+          ctx.font = 'bold 48px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('TEST GRID', 256, 256);
+
+          return canvas.toDataURL('image/png');
+        }
+
+        // 緯度経度 → タイル座標(小数含む)
+        function lonLatToTileFloat(lon, lat, zoom) {
+          var latRad = lat * Math.PI / 180;
+          var n = Math.pow(2, zoom);
+          var x = (lon + 180) / 360 * n;
+          var y = (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n;
+          return { x: x, y: y };
+        }
+
+        // 指定ズームでの1タイルあたりの実サイズ(m)を計算
+        function tileSizeMeters(lat, zoom) {
+          var n = Math.pow(2, zoom);
+          var tileLonSpan = 360 / n;
+          var metersPerDegreeLon = 111320 * Math.cos(lat * Math.PI / 180);
+          return tileLonSpan * metersPerDegreeLon;
+        }
+
+        // 正方形画像から、中心を基準にした扇形(startAngle〜endAngle、度数法、北=0度・時計回り)を切り出す
+        function cropSector(img, srcSize, startAngleDeg, endAngleDeg, outSize) {
+          var canvas = document.createElement('canvas');
+          canvas.width = outSize;
+          canvas.height = outSize;
+          var ctx = canvas.getContext('2d');
+
+          var cx = srcSize / 2;
+          var cy = srcSize / 2;
+          var radius = srcSize / 2;
+
+          // 扇形のクリップパスを作成（canvas角度系は数学の0度=右方向・反時計回りなので変換する）
+          // 北=0度・時計回り(コンパス方位) → canvas角度 = -(compassDeg) - 90 (度) → ラジアン変換
+          function compassToCanvasRad(deg) {
+            return (deg - 90) * Math.PI / 180;
+          }
+
+          ctx.save();
+          ctx.beginPath();
+          ctx.moveTo(cx, cy);
+          ctx.arc(cx, cy, radius, compassToCanvasRad(startAngleDeg), compassToCanvasRad(endAngleDeg));
+          ctx.closePath();
+          ctx.clip();
+
+          ctx.drawImage(img, 0, 0, srcSize, srcSize, 0, 0, outSize, outSize);
+          ctx.restore();
+
+          return canvas;
+        }
+
+        camEl.addEventListener("gps-camera-update-position", function(e) {
+          var lat = e.detail.position.latitude;
+          var lon = e.detail.position.longitude;
+          log("GPS位置取得: lat=" + lat.toFixed(6) + " lon=" + lon.toFixed(6), 'info');
+
+          if (gridBuilt) return;
+          gridBuilt = true;
+
+          var radiusKm = 60;
+
+          fetch("https://api.rainviewer.com/public/weather-maps.json")
+            .then(function(res) { return res.json(); })
+            .then(function(data) {
+              var host = data.host;
+              var pastFrames = data.radar && data.radar.past;
+              if (!pastFrames || pastFrames.length === 0) {
+                log("RainViewerに利用可能なフレームがありません", 'err');
+                return;
+              }
+              var latestFrame = pastFrames[pastFrames.length - 1];
+              log("RainViewer最新フレーム: " + new Date(latestFrame.time * 1000).toLocaleString('ja-JP'), 'info');
+
+              var zoom = 7;
+              var tileFloat = lonLatToTileFloat(lon, lat, zoom);
+              var tx = Math.floor(tileFloat.x);
+              var ty = Math.floor(tileFloat.y);
+              var fracX = tileFloat.x - tx;
+              var fracY = tileFloat.y - ty;
+              var tileMeters = tileSizeMeters(lat, zoom);
+              var tileUrl = host + latestFrame.path + '/256/' + zoom + '/' + tx + '/' + ty + '/4/1_1.png';
+              log("タイルURL: " + tileUrl, 'info');
+
+              var img = new Image();
+              img.crossOrigin = "anonymous";
+              img.onload = function() {
+                log("タイル画像の読み込み成功 (" + img.width + "x" + img.height + ")", 'info');
+
+                // 半径60km分に対応する正方形(直径120km分)をまず切り出す
+                var pxPerMeter = 256 / tileMeters;
+                var cropRadiusPx = radiusKm * 1000 * pxPerMeter;
+                var cropSizePx = cropRadiusPx * 2;
+                var centerPxX = fracX * 256;
+                var centerPxY = fracY * 256;
+
+                var squareCanvas = document.createElement('canvas');
+                var squareSize = 512;
+                squareCanvas.width = squareSize;
+                squareCanvas.height = squareSize;
+                var sqCtx = squareCanvas.getContext('2d');
+                try {
+                  sqCtx.drawImage(
+                    img,
+                    centerPxX - cropRadiusPx, centerPxY - cropRadiusPx, cropSizePx, cropSizePx,
+                    0, 0, squareSize, squareSize
+                  );
+                } catch (err) {
+                  log("[Canvas切り出しエラー] " + err.message + " ※CORS制限の可能性があります", 'err');
+                  return;
+                }
+                log("半径" + radiusKm + "km分の正方形切り出し成功", 'info');
+
+                // この正方形画像を、8方向の扇形パネルに分割して円柱状に配置
+                var segments = 8;
+                var angleStep = 360 / segments;
+                var sceneEl = document.querySelector('a-scene');
+
+                var squareImg = new Image();
+                squareImg.onload = function() {
+                  for (var i = 0; i < segments; i++) {
+                    var startAngle = i * angleStep;
+                    var endAngle = (i + 1) * angleStep;
+                    var midAngle = (startAngle + endAngle) / 2;
+
+                    var sectorCanvas = cropSector(squareImg, squareSize, startAngle, endAngle, 512);
+                    var sectorDataUrl = sectorCanvas.toDataURL('image/png');
+
+                    // midAngle方向、半径60km(radiusKm)の位置にパネルを配置
+                    var midAngleRad = midAngle * Math.PI / 180;
+                    var offsetLat = (radiusKm / 111.32) * Math.cos(midAngleRad);
+                    var offsetLon = (radiusKm / (111.32 * Math.cos(lat * Math.PI / 180))) * Math.sin(midAngleRad);
+
+                    var entity = document.createElement("a-entity");
+                    entity.setAttribute('gps-new-entity-place', {
+                      latitude: lat + offsetLat,
+                      longitude: lon + offsetLon
+                    });
+
+                    var panelSize = radiusKm * 1000 * 1.3; // 扇形がやや大きく写るよう余裕を持たせる
+                    var plane = document.createElement("a-plane");
+                    plane.setAttribute("width", panelSize);
+                    plane.setAttribute("height", panelSize);
+                    plane.setAttribute("material", "shader: flat; src: " + sectorDataUrl + "; transparent: true; opacity: 0.85; side: double");
+                    plane.setAttribute("position", "0 " + (panelSize / 4) + " 0");
+                    // パネルが常に中心（自分）を向くよう、方角に応じて回転させる
+                    plane.setAttribute("rotation", "0 " + (-midAngle) + " 0");
+
+                    entity.appendChild(plane);
+                    sceneEl.appendChild(entity);
+                  }
+                  log(segments + "枚の扇形パネルを円柱状に配置しました（半径" + radiusKm + "km）", 'info');
+                };
+                squareImg.src = squareCanvas.toDataURL('image/png');
+              };
+              img.onerror = function() {
+                log("[画像読み込みエラー] タイル画像の取得に失敗しました", 'err');
+              };
+              img.src = tileUrl;
+            })
+            .catch(function(err) {
+              log("[RainViewer fetch error] " + err.message, 'err');
+            });
+        });
+      }, 300);
+    }
+
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      DeviceOrientationEvent.requestPermission().then(function(response) {
+        log("DeviceOrientationEvent permission: " + response);
+        if (response === 'granted') {
+          proceedToAR();
+        } else {
+          log("モーションセンサーの許可が拒否されました", 'err');
+        }
+      }).catch(function(err) {
+        log("[DeviceOrientation permission error] " + err.message, 'err');
+      });
+    } else {
+      proceedToAR();
+    }
+  });
+</script>
+
+</body>
+</html>
