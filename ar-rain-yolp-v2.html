@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>AR 雨雲レーダー YOLP版</title>
+<script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+<script type='text/javascript' src='https://raw.githack.com/AR-js-org/AR.js/3.4.7/three.js/build/ar-threex-location-only.js'></script>
+<script type='text/javascript' src='https://raw.githack.com/AR-js-org/AR.js/3.4.7/aframe/build/aframe-ar.js'></script>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  #startOverlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(20,20,20,0.95);
+    color: white;
+    z-index: 5000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 20px;
+    box-sizing: border-box;
+  }
+  #startBtn {
+    margin-top: 20px;
+    padding: 16px 32px;
+    font-size: 18px;
+    background: #2a7fff;
+    color: white;
+    border: none;
+    border-radius: 8px;
+  }
+  #progressText {
+    margin-top: 16px;
+    font-size: 14px;
+    color: #9cf;
+  }
+  #logPanel {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 3000;
+    background: rgba(0,0,0,0.75);
+    color: #0f0;
+    padding: 6px 8px;
+    font-size: 10px;
+    font-family: monospace;
+    max-height: 35vh;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+  #logPanel .err { color: #f66; }
+  #logPanel .info { color: #6cf; }
+  #previewCanvas {
+    position: fixed;
+    top: 10px;
+    right: 10px;
+    z-index: 4000;
+    width: 120px;
+    height: 120px;
+    border: 2px solid white;
+    display: none;
+  }
+</style>
+</head>
+<body>
+
+<div id="startOverlay">
+  <h2>AR 雨雲レーダー (YOLP版)</h2>
+  <p>中心2kmは250mグリッド、〜10kmは1kmグリッドで<br>降水強度を取得しヒートマップ化します。</p>
+  <button id="startBtn">ARを開始する</button>
+  <div id="progressText"></div>
+</div>
+
+<canvas id="previewCanvas"></canvas>
+<div id="logPanel"></div>
+
+<script>
+  var YOLP_APP_ID = "dmVyPTIwMjUwNyZpZD1sT2NsQXZQQkhBJmhhc2g9Tm1FeE5qTmtOV0ZqWW1FNE5qUm1ZZw";
+  var logEl = document.getElementById('logPanel');
+  function log(msg, cls) {
+    var line = document.createElement('div');
+    if (cls) line.className = cls;
+    var t = new Date();
+    var ts = t.toTimeString().split(' ')[0] + '.' + String(t.getMilliseconds()).padStart(3,'0');
+    line.textContent = '[' + ts + '] ' + msg;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  window.addEventListener('error', function(e) {
+    var detail = e.message;
+    if (e.filename) detail += " @" + e.filename.split('/').pop() + ":" + e.lineno;
+    log("[JS ERROR] " + detail, 'err');
+  });
+  window.addEventListener('unhandledrejection', function(e) {
+    log("[PROMISE REJECTION] " + (e.reason && e.reason.message ? e.reason.message : JSON.stringify(e.reason)), 'err');
+  });
+
+  log("ページ読み込み完了。AFRAME loaded=" + (typeof AFRAME !== 'undefined'));
+
+  // 緯度1度あたりの距離(m)、経度1度あたりの距離(m、緯度に依存)
+  function metersPerDegree(lat) {
+    var latM = 111320;
+    var lonM = 111320 * Math.cos(lat * Math.PI / 180);
+    return { lat: latM, lon: lonM };
+  }
+
+  // 降水強度(mm/h)を色に変換する（気象庁配色に近いグラデーション: 水色→黄→橙→赤）
+  function rainfallToColor(mmh) {
+    if (mmh <= 0) return [0, 0, 0, 0]; // 降水なし: 透明
+    var stops = [
+      { v: 0,   c: [173, 216, 230, 120] }, // 弱い: 水色(半透明)
+      { v: 5,   c: [100, 180, 255, 180] },
+      { v: 10,  c: [255, 255, 100, 200] }, // 黄
+      { v: 20,  c: [255, 165, 0, 220] },   // 橙
+      { v: 50,  c: [255, 0, 0, 240] },     // 強い: 赤
+      { v: 80,  c: [180, 0, 120, 255] }    // 非常に強い: 紫
+    ];
+    var v = Math.min(mmh, stops[stops.length - 1].v);
+    for (var i = 0; i < stops.length - 1; i++) {
+      if (v >= stops[i].v && v <= stops[i+1].v) {
+        var t = (v - stops[i].v) / (stops[i+1].v - stops[i].v);
+        var c0 = stops[i].c, c1 = stops[i+1].c;
+        return [
+          Math.round(c0[0] + (c1[0]-c0[0])*t),
+          Math.round(c0[1] + (c1[1]-c0[1])*t),
+          Math.round(c0[2] + (c1[2]-c0[2])*t),
+          Math.round(c0[3] + (c1[3]-c0[3])*t)
+        ];
+      }
+    }
+    return stops[stops.length-1].c;
+  }
+
+  // YOLP APIに複数座標(最大10)をまとめて問い合わせる
+  function fetchYolpBatch(coordList) {
+    // coordList: [{lon, lat}, ...] 最大10件
+    var coordStr = coordList.map(function(c) {
+      return c.lon.toFixed(6) + ',' + c.lat.toFixed(6);
+    }).join(' ');
+    var url = "https://map.yahooapis.jp/weather/V1/place?coordinates=" +
+      encodeURIComponent(coordStr) + "&appid=" + YOLP_APP_ID + "&output=json";
+    log("[fetch開始] " + url, 'info');
+    return fetch(url).then(function(res) {
+      log("[fetch応答] status=" + res.status + " type=" + res.type, 'info');
+      if (!res.ok) throw new Error("YOLP HTTPエラー: " + res.status);
+      return res.json();
+    }).catch(function(err) {
+      log("[fetch例外詳細] name=" + err.name + " message=" + err.message, 'err');
+      throw err;
+    });
+  }
+
+  document.getElementById('startBtn').addEventListener('click', function() {
+    var overlay = document.getElementById('startOverlay');
+    var progressText = document.getElementById('progressText');
+
+    function proceedToAR() {
+      overlay.style.display = 'none';
+      log("AR開始処理を実行します");
+
+      var sceneHTML =
+        '<a-scene vr-mode-ui="enabled: false" arjs="sourceType: webcam; videoTexture: true; debugUIEnabled: false" renderer="antialias: true; alpha: true; logarithmicDepthBuffer: true; precision: highp">' +
+        '  <a-camera gps-new-camera="gpsMinDistance: 5" far="50000" near="0.1"></a-camera>' +
+        '</a-scene>';
+      document.body.insertAdjacentHTML('beforeend', sceneHTML);
+      log("a-sceneをDOMに追加しました");
+
+      var gridBuilt = false;
+      var checkInterval = setInterval(function() {
+        var camEl = document.querySelector("[gps-new-camera]");
+        if (!camEl) return;
+        clearInterval(checkInterval);
+        log("gps-new-camera 要素を発見。イベント登録します");
+
+        camEl.addEventListener("gps-camera-update-position", function(e) {
+          var lat = e.detail.position.latitude;
+          var lon = e.detail.position.longitude;
+          log("GPS位置取得: lat=" + lat.toFixed(6) + " lon=" + lon.toFixed(6), 'info');
+
+          if (gridBuilt) return;
+          gridBuilt = true;
+
+          buildHeatmap(lat, lon);
+        });
+      }, 300);
+    }
+
+    function buildHeatmap(centerLat, centerLon) {
+      var mpd = metersPerDegree(centerLat);
+
+      // --- グリッド地点リストを構築 ---
+      // 内側: -2km〜+2km を 250m刻み (16x16=256点)
+      // 外側: -10km〜+10km を 1km刻み (20x20=400点)のうち、内側と重なる範囲(-2km〜+2km相当)を除外
+      var points = []; // { lon, lat, xMeters, yMeters, cellSizeMeters }
+
+      var innerRadius = 2000; // 2km
+      var innerStep = 250;
+      for (var x = -innerRadius + innerStep/2; x < innerRadius; x += innerStep) {
+        for (var y = -innerRadius + innerStep/2; y < innerRadius; y += innerStep) {
+          points.push({
+            xMeters: x, yMeters: y, cellSizeMeters: innerStep,
+            lon: centerLon + x / mpd.lon,
+            lat: centerLat + y / mpd.lat
+          });
+        }
+      }
+
+      var outerRadius = 10000; // 10km
+      var outerStep = 1000;
+      for (var x2 = -outerRadius + outerStep/2; x2 < outerRadius; x2 += outerStep) {
+        for (var y2 = -outerRadius + outerStep/2; y2 < outerRadius; y2 += outerStep) {
+          // 内側ゾーンと重なる範囲は除外
+          if (Math.abs(x2) < innerRadius && Math.abs(y2) < innerRadius) continue;
+          points.push({
+            xMeters: x2, yMeters: y2, cellSizeMeters: outerStep,
+            lon: centerLon + x2 / mpd.lon,
+            lat: centerLat + y2 / mpd.lat
+          });
+        }
+      }
+
+      log("グリッド地点総数: " + points.length + " 件（約" + Math.ceil(points.length/10) + "回のAPIリクエストが必要）", 'info');
+      progressText.textContent = "データ取得中... 0/" + points.length;
+      overlay.style.display = 'flex'; // 進捗表示のため一時的に再表示
+
+      // --- 10件ずつバッチでYOLP APIを叩く ---
+      var batchSize = 10;
+      var batches = [];
+      for (var i = 0; i < points.length; i += batchSize) {
+        batches.push(points.slice(i, i + batchSize));
+      }
+
+      var completedCount = 0;
+      var results = []; // { xMeters, yMeters, cellSizeMeters, rainfall }
+      var firstErrorShown = false;
+
+      function processBatch(index) {
+        if (index >= batches.length) {
+          log("全バッチ取得完了。ヒートマップを生成します。", 'info');
+          overlay.style.display = 'none';
+          renderHeatmapAndPlace(centerLat, centerLon, results);
+          return;
+        }
+        var batch = batches[index];
+        fetchYolpBatch(batch).then(function(data) {
+          if (data.Feature) {
+            data.Feature.forEach(function(feature, i) {
+              var rainfall = 0;
+              try {
+                rainfall = feature.Property.WeatherList.Weather[0].Rainfall;
+              } catch (err) {
+                rainfall = 0;
+              }
+              results.push({
+                xMeters: batch[i].xMeters,
+                yMeters: batch[i].yMeters,
+                cellSizeMeters: batch[i].cellSizeMeters,
+                rainfall: rainfall
+              });
+            });
+          }
+          completedCount += batch.length;
+          progressText.textContent = "データ取得中... " + completedCount + "/" + points.length;
+          processBatch(index + 1);
+        }).catch(function(err) {
+          if (!firstErrorShown) {
+            firstErrorShown = true;
+            log("最初のエラーを検知したため、以降のバッチをスキップして中断します", 'err');
+            progressText.textContent = "エラーのため中断しました";
+            overlay.style.display = 'flex';
+            return; // 以降のバッチを実行せず打ち切る
+          }
+        });
+      }
+
+      processBatch(0);
+    }
+
+    function renderHeatmapAndPlace(centerLat, centerLon, results) {
+      var canvasSize = 800;
+      var worldRadius = 10000; // 描画範囲は半径10km
+      var canvas = document.createElement('canvas');
+      canvas.width = canvasSize;
+      canvas.height = canvasSize;
+      var ctx = canvas.getContext('2d');
+
+      var pxPerMeter = canvasSize / (worldRadius * 2);
+
+      var maxRainfall = 0;
+      results.forEach(function(r) {
+        if (r.rainfall > maxRainfall) maxRainfall = r.rainfall;
+        var color = rainfallToColor(r.rainfall);
+        var cellPx = r.cellSizeMeters * pxPerMeter;
+        // xMeters,yMetersは中心からのオフセット。canvas座標は左上原点なので変換
+        var px = canvasSize/2 + r.xMeters * pxPerMeter - cellPx/2;
+        var py = canvasSize/2 - r.yMeters * pxPerMeter - cellPx/2; // Y軸は北が上になるよう反転
+        ctx.fillStyle = 'rgba(' + color[0] + ',' + color[1] + ',' + color[2] + ',' + (color[3]/255) + ')';
+        ctx.fillRect(px, py, cellPx + 1, cellPx + 1); // +1で隙間を防ぐ
+      });
+
+      log("ヒートマップ生成完了。最大降水強度: " + maxRainfall.toFixed(2) + "mm/h", 'info');
+
+      // プレビュー表示
+      var previewCanvas = document.getElementById('previewCanvas');
+      previewCanvas.width = canvasSize;
+      previewCanvas.height = canvasSize;
+      previewCanvas.getContext('2d').drawImage(canvas, 0, 0);
+      previewCanvas.style.display = 'block';
+
+      var dataUrl = canvas.toDataURL('image/png');
+
+      // AR空間に配置（現在地の真正面、垂直な壁として）
+      var sizeMeters = worldRadius * 2; // 直径20km
+      var entity = document.createElement("a-entity");
+      entity.setAttribute('gps-new-entity-place', {
+        latitude: centerLat + (worldRadius / 2 / 111320),
+        longitude: centerLon
+      });
+
+      var plane = document.createElement("a-plane");
+      plane.setAttribute("width", sizeMeters);
+      plane.setAttribute("height", sizeMeters);
+      plane.setAttribute("material", "shader: flat; src: " + dataUrl + "; transparent: true; opacity: 0.85; side: double");
+      plane.setAttribute("position", "0 " + (sizeMeters / 4) + " 0");
+
+      plane.addEventListener('materialtextureloaded', function() {
+        log("ヒートマップのテクスチャ読み込み成功", 'info');
+      });
+
+      entity.appendChild(plane);
+      document.querySelector('a-scene').appendChild(entity);
+      log("ヒートマップパネルをAR空間に配置しました（直径" + (sizeMeters/1000) + "km）", 'info');
+    }
+
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      DeviceOrientationEvent.requestPermission().then(function(response) {
+        log("DeviceOrientationEvent permission: " + response);
+        if (response === 'granted') {
+          proceedToAR();
+        } else {
+          log("モーションセンサーの許可が拒否されました", 'err');
+        }
+      }).catch(function(err) {
+        log("[DeviceOrientation permission error] " + err.message, 'err');
+      });
+    } else {
+      proceedToAR();
+    }
+  });
+</script>
+
+</body>
+</html>
