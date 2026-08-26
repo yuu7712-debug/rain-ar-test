@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>AR 雨雲レーダー (地図背景版)</title>
+<script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+<script type='text/javascript' src='https://raw.githack.com/AR-js-org/AR.js/3.4.7/three.js/build/ar-threex-location-only.js'></script>
+<script type='text/javascript' src='https://raw.githack.com/AR-js-org/AR.js/3.4.7/aframe/build/aframe-ar.js'></script>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  #startOverlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(20,20,20,0.95);
+    color: white;
+    z-index: 5000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 20px;
+    box-sizing: border-box;
+  }
+  #startBtn {
+    margin-top: 20px;
+    padding: 16px 32px;
+    font-size: 18px;
+    background: #2a7fff;
+    color: white;
+    border: none;
+    border-radius: 8px;
+  }
+  #progressText {
+    margin-top: 16px;
+    font-size: 14px;
+    color: #9cf;
+  }
+  #controlPanel {
+    position: fixed;
+    top: 10px;
+    left: 10px;
+    right: 10px;
+    z-index: 1000;
+    background: rgba(0,0,0,0.65);
+    color: white;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    display: none;
+  }
+  #controlPanel label { display: block; margin-top: 4px; }
+  #controlPanel input[type=range] { width: 100%; }
+  #logPanel {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 3000;
+    background: rgba(0,0,0,0.75);
+    color: #0f0;
+    padding: 6px 8px;
+    font-size: 10px;
+    font-family: monospace;
+    max-height: 30vh;
+    overflow-y: auto;
+    white-space: pre-wrap;
+  }
+  #logPanel .err { color: #f66; }
+  #logPanel .info { color: #6cf; }
+  #previewCanvas {
+    position: fixed;
+    top: 100px;
+    right: 10px;
+    z-index: 4000;
+    width: 100px;
+    height: 100px;
+    border: 2px solid white;
+    display: none;
+  }
+</style>
+</head>
+<body>
+
+<div id="startOverlay">
+  <h2>AR 雨雲レーダー (地図背景版)</h2>
+  <p>中心2kmは500mグリッド、〜10kmは1kmグリッドで<br>実際の降水強度を取得し、地図と重ねて表示します。<br>
+  データ取得後、地図タイルの読み込みも行うため少し時間がかかります。</p>
+  <button id="startBtn">ARを開始する</button>
+  <div id="progressText"></div>
+</div>
+
+<div id="controlPanel">
+  <label>表示スケール: <span id="scaleValue">1.0</span>倍
+    <input type="range" id="scaleSlider" min="0.02" max="3" step="0.02" value="1.0">
+  </label>
+  <label>雲の高さ: <span id="heightValue">2000</span>m
+    <input type="range" id="heightSlider" min="500" max="10000" step="100" value="2000">
+  </label>
+</div>
+
+<canvas id="previewCanvas"></canvas>
+<div id="logPanel"></div>
+
+<script>
+  var YOLP_APP_ID = "dmVyPTIwMjUwNyZpZD1sT2NsQXZQQkhBJmhhc2g9Tm1FeE5qTmtOV0ZqWW1FNE5qUm1ZZw";
+  var YOLP_PROXY_URL = "https://yolp-proxy.yuu7712.workers.dev/";
+
+  // ==== 動作モード ====
+  var TEST_MODE = false; // false: 実際のYOLP APIから取得する
+
+  var logEl = document.getElementById('logPanel');
+  function log(msg, cls) {
+    var line = document.createElement('div');
+    if (cls) line.className = cls;
+    var t = new Date();
+    var ts = t.toTimeString().split(' ')[0] + '.' + String(t.getMilliseconds()).padStart(3,'0');
+    line.textContent = '[' + ts + '] ' + msg;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  window.addEventListener('error', function(e) {
+    var detail = e.message;
+    if (e.filename) detail += " @" + e.filename.split('/').pop() + ":" + e.lineno;
+    log("[JS ERROR] " + detail, 'err');
+  });
+  window.addEventListener('unhandledrejection', function(e) {
+    log("[PROMISE REJECTION] " + (e.reason && e.reason.message ? e.reason.message : JSON.stringify(e.reason)), 'err');
+  });
+
+  log("ページ読み込み完了。AFRAME loaded=" + (typeof AFRAME !== 'undefined'));
+
+  function metersPerDegree(lat) {
+    var latM = 111320;
+    var lonM = 111320 * Math.cos(lat * Math.PI / 180);
+    return { lat: latM, lon: lonM };
+  }
+
+  function rainfallToColor(mmh) {
+    if (mmh <= 0) return [0, 0, 0, 0];
+    var stops = [
+      { v: 0,   c: [173, 216, 230, 120] },
+      { v: 5,   c: [100, 180, 255, 180] },
+      { v: 10,  c: [255, 255, 100, 200] },
+      { v: 20,  c: [255, 165, 0, 220] },
+      { v: 50,  c: [255, 0, 0, 240] },
+      { v: 80,  c: [180, 0, 120, 255] }
+    ];
+    var v = Math.min(mmh, stops[stops.length - 1].v);
+    for (var i = 0; i < stops.length - 1; i++) {
+      if (v >= stops[i].v && v <= stops[i+1].v) {
+        var t = (v - stops[i].v) / (stops[i+1].v - stops[i].v);
+        var c0 = stops[i].c, c1 = stops[i+1].c;
+        return [
+          Math.round(c0[0] + (c1[0]-c0[0])*t),
+          Math.round(c0[1] + (c1[1]-c0[1])*t),
+          Math.round(c0[2] + (c1[2]-c0[2])*t),
+          Math.round(c0[3] + (c1[3]-c0[3])*t)
+        ];
+      }
+    }
+    return stops[stops.length-1].c;
+  }
+
+  // 緯度経度 → OSMタイル座標(小数)
+  function lonLatToTileFloat(lon, lat, zoom) {
+    var latRad = lat * Math.PI / 180;
+    var n = Math.pow(2, zoom);
+    var x = (lon + 180) / 360 * n;
+    var y = (1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n;
+    return { x: x, y: y };
+  }
+
+  // 中心地点周辺のOSMタイルを取得し、1枚のCanvasに合成して返す（Promiseで返却）
+  function loadOsmBackground(centerLat, centerLon, worldRadiusMeters, outputSize) {
+    return new Promise(function(resolve) {
+      var zoom = 12; // 半径10km程度を程よい詳細さで見せられるズームレベル
+      var n = Math.pow(2, zoom);
+      var tileLonSpan = 360 / n;
+      var metersPerDegreeLon = 111320 * Math.cos(centerLat * Math.PI / 180);
+      var tileMeters = tileLonSpan * metersPerDegreeLon;
+
+      var centerTileFloat = lonLatToTileFloat(centerLon, centerLat, zoom);
+      var centerTileX = Math.floor(centerTileFloat.x);
+      var centerTileY = Math.floor(centerTileFloat.y);
+      var fracX = centerTileFloat.x - centerTileX;
+      var fracY = centerTileFloat.y - centerTileY;
+
+      // 必要なタイル枚数(片側)を計算
+      var tilesNeeded = Math.ceil((worldRadiusMeters / tileMeters)) + 1;
+
+      var canvas = document.createElement('canvas');
+      canvas.width = outputSize;
+      canvas.height = outputSize;
+      var ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#1a1a1a';
+      ctx.fillRect(0, 0, outputSize, outputSize);
+
+      var pxPerMeter = outputSize / (worldRadiusMeters * 2);
+      var pxPerTile = tileMeters * pxPerMeter;
+
+      var loadPromises = [];
+      for (var dx = -tilesNeeded; dx <= tilesNeeded; dx++) {
+        for (var dy = -tilesNeeded; dy <= tilesNeeded; dy++) {
+          (function(dx, dy) {
+            var tx = centerTileX + dx;
+            var ty = centerTileY + dy;
+            var url = "https://tile.openstreetmap.org/" + zoom + "/" + tx + "/" + ty + ".png";
+
+            var p = new Promise(function(res) {
+              var img = new Image();
+              img.crossOrigin = "anonymous";
+              img.onload = function() {
+                // このタイルの中心からのオフセット(タイル数単位)を計算し、px位置に変換
+                var tileOffsetX = dx - fracX;
+                var tileOffsetY = dy - fracY;
+                var px = outputSize/2 + tileOffsetX * pxPerTile;
+                var py = outputSize/2 + tileOffsetY * pxPerTile;
+                try {
+                  ctx.drawImage(img, px, py, pxPerTile, pxPerTile);
+                } catch (e) {}
+                res();
+              };
+              img.onerror = function() {
+                log("[OSMタイル読み込み失敗] " + this.src, 'err');
+                res();
+              };
+              img.src = url;
+            });
+            loadPromises.push(p);
+          })(dx, dy);
+        }
+      }
+
+      Promise.all(loadPromises).then(function() {
+        resolve(canvas);
+      });
+    });
+  }
+
+  function fetchYolpBatch(coordList) {
+    var coordStr = coordList.map(function(c) {
+      return c.lon.toFixed(6) + ',' + c.lat.toFixed(6);
+    }).join(' ');
+    var url = YOLP_PROXY_URL + "?coordinates=" +
+      encodeURIComponent(coordStr) + "&appid=" + encodeURIComponent(YOLP_APP_ID) + "&output=json";
+    return fetch(url).then(function(res) {
+      if (!res.ok) throw new Error("YOLP HTTPエラー: " + res.status);
+      return res.json();
+    });
+  }
+
+  document.getElementById('startBtn').addEventListener('click', function() {
+    var overlay = document.getElementById('startOverlay');
+    var progressText = document.getElementById('progressText');
+
+    function proceedToAR() {
+      overlay.style.display = 'none';
+      document.getElementById('controlPanel').style.display = 'block';
+      log("AR開始処理を実行します");
+
+      var sceneHTML =
+        '<a-scene vr-mode-ui="enabled: false" arjs="sourceType: webcam; videoTexture: true; debugUIEnabled: false" renderer="antialias: true; alpha: true; logarithmicDepthBuffer: true; precision: highp">' +
+        '  <a-camera gps-new-camera="gpsMinDistance: 5" far="50000" near="0.1"></a-camera>' +
+        '</a-scene>';
+      document.body.insertAdjacentHTML('beforeend', sceneHTML);
+      log("a-sceneをDOMに追加しました");
+
+      var gridBuilt = false;
+      var checkInterval = setInterval(function() {
+        var camEl = document.querySelector("[gps-new-camera]");
+        if (!camEl) return;
+        clearInterval(checkInterval);
+        log("gps-new-camera 要素を発見。イベント登録します");
+
+        camEl.addEventListener("gps-camera-update-position", function(e) {
+          var lat = e.detail.position.latitude;
+          var lon = e.detail.position.longitude;
+          log("GPS位置取得: lat=" + lat.toFixed(6) + " lon=" + lon.toFixed(6), 'info');
+
+          if (gridBuilt) return;
+          gridBuilt = true;
+
+          buildHeatmap(lat, lon);
+        });
+      }, 300);
+    }
+
+    // --- グリッド設定（範囲を拡張: 内側2km/250m、外側15km/1km） ---
+    var innerRadius = 2000;
+    var innerStep = 500; // 250m→500mに変更（粗く・軽量化）
+    var outerRadius = 10000; // 5km→10kmに戻す
+    var outerStep = 1000;
+
+    function buildHeatmap(centerLat, centerLon) {
+      var mpd = metersPerDegree(centerLat);
+      var points = [];
+
+      for (var x = -innerRadius + innerStep/2; x < innerRadius; x += innerStep) {
+        for (var y = -innerRadius + innerStep/2; y < innerRadius; y += innerStep) {
+          points.push({
+            xMeters: x, yMeters: y, cellSizeMeters: innerStep,
+            lon: centerLon + x / mpd.lon,
+            lat: centerLat + y / mpd.lat
+          });
+        }
+      }
+      for (var x2 = -outerRadius + outerStep/2; x2 < outerRadius; x2 += outerStep) {
+        for (var y2 = -outerRadius + outerStep/2; y2 < outerRadius; y2 += outerStep) {
+          if (Math.abs(x2) < innerRadius && Math.abs(y2) < innerRadius) continue;
+          points.push({
+            xMeters: x2, yMeters: y2, cellSizeMeters: outerStep,
+            lon: centerLon + x2 / mpd.lon,
+            lat: centerLat + y2 / mpd.lat
+          });
+        }
+      }
+
+      log("グリッド地点総数: " + points.length + " 件（約" + Math.ceil(points.length/10) + "回のAPIリクエスト）", 'info');
+      progressText.textContent = "データ取得中... 0/" + points.length;
+      overlay.style.display = 'flex';
+
+      var batchSize = 10;
+      var batches = [];
+      for (var i = 0; i < points.length; i += batchSize) {
+        batches.push(points.slice(i, i + batchSize));
+      }
+
+      var completedCount = 0;
+      var results = [];
+      var firstErrorShown = false;
+
+      function processBatch(index) {
+        if (index >= batches.length) {
+          log("全バッチ取得完了。ヒートマップを生成します。", 'info');
+          overlay.style.display = 'none';
+          renderHeatmapAndPlace(centerLat, centerLon, results);
+          return;
+        }
+        var batch = batches[index];
+
+        if (TEST_MODE) {
+          batch.forEach(function(pt) {
+            var d = Math.sqrt(pt.xMeters*pt.xMeters + pt.yMeters*pt.yMeters);
+            results.push({ xMeters: pt.xMeters, yMeters: pt.yMeters, cellSizeMeters: pt.cellSizeMeters, rainfall: Math.max(0, 60*(1-d/2000)) });
+          });
+          completedCount += batch.length;
+          progressText.textContent = "テストデータ生成中... " + completedCount + "/" + points.length;
+          processBatch(index + 1);
+          return;
+        }
+
+        fetchYolpBatch(batch).then(function(data) {
+          if (data.Feature) {
+            data.Feature.forEach(function(feature, i) {
+              var rainfall = 0;
+              try {
+                rainfall = feature.Property.WeatherList.Weather[0].Rainfall;
+              } catch (err) {
+                rainfall = 0;
+              }
+              results.push({
+                xMeters: batch[i].xMeters,
+                yMeters: batch[i].yMeters,
+                cellSizeMeters: batch[i].cellSizeMeters,
+                rainfall: rainfall
+              });
+            });
+          }
+          completedCount += batch.length;
+          progressText.textContent = "データ取得中... " + completedCount + "/" + points.length;
+          processBatch(index + 1);
+        }).catch(function(err) {
+          log("[YOLPバッチエラー] " + err.message, 'err');
+          if (!firstErrorShown) {
+            firstErrorShown = true;
+            log("エラーを検知しましたが、残りのバッチも試行を続けます", 'err');
+          }
+          completedCount += batch.length;
+          progressText.textContent = "データ取得中(一部エラー)... " + completedCount + "/" + points.length;
+          processBatch(index + 1);
+        });
+      }
+
+      processBatch(0);
+    }
+
+    var planeEl = null;
+    var baseDisplaySize = 0;
+
+    function renderHeatmapAndPlace(centerLat, centerLon, results) {
+      var canvasSize = 1600;
+      var worldRadius = outerRadius;
+
+      log("OpenStreetMapの背景タイルを読み込み中...", 'info');
+      loadOsmBackground(centerLat, centerLon, worldRadius, canvasSize).then(function(canvas) {
+        log("背景地図の合成完了", 'info');
+        var ctx = canvas.getContext('2d');
+        var pxPerMeter = canvasSize / (worldRadius * 2);
+
+        // 地図の上に半透明の黒を薄く重ねて、ヒートマップの色を見やすくする
+        ctx.fillStyle = 'rgba(0,0,0,0.15)';
+        ctx.fillRect(0, 0, canvasSize, canvasSize);
+
+        var maxRainfall = 0;
+        results.forEach(function(r) {
+          if (r.rainfall > maxRainfall) maxRainfall = r.rainfall;
+          var color = rainfallToColor(r.rainfall);
+          var cellPx = r.cellSizeMeters * pxPerMeter;
+          var px = canvasSize/2 + r.xMeters * pxPerMeter - cellPx/2;
+          var py = canvasSize/2 - r.yMeters * pxPerMeter - cellPx/2;
+          ctx.fillStyle = 'rgba(' + color[0] + ',' + color[1] + ',' + color[2] + ',' + (color[3]/255) + ')';
+          ctx.fillRect(px, py, cellPx + 1, cellPx + 1);
+        });
+        log("ヒートマップ重ね描画完了。最大降水強度: " + maxRainfall.toFixed(2) + "mm/h", 'info');
+
+        // グリッド線
+        ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+        ctx.lineWidth = 1;
+        var innerStepPx = innerStep * pxPerMeter;
+        var innerRangePx = innerRadius * pxPerMeter;
+        for (var gx = canvasSize/2 - innerRangePx; gx <= canvasSize/2 + innerRangePx; gx += innerStepPx) {
+          ctx.beginPath(); ctx.moveTo(gx, canvasSize/2 - innerRangePx); ctx.lineTo(gx, canvasSize/2 + innerRangePx); ctx.stroke();
+        }
+        for (var gy = canvasSize/2 - innerRangePx; gy <= canvasSize/2 + innerRangePx; gy += innerStepPx) {
+          ctx.beginPath(); ctx.moveTo(canvasSize/2 - innerRangePx, gy); ctx.lineTo(canvasSize/2 + innerRangePx, gy); ctx.stroke();
+        }
+
+        ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+        ctx.lineWidth = 2;
+        var kmStepPx = 1000 * pxPerMeter;
+        for (var kx = 0; kx <= canvasSize; kx += kmStepPx) {
+          ctx.beginPath(); ctx.moveTo(kx, 0); ctx.lineTo(kx, canvasSize); ctx.stroke();
+        }
+        for (var ky = 0; ky <= canvasSize; ky += kmStepPx) {
+          ctx.beginPath(); ctx.moveTo(0, ky); ctx.lineTo(canvasSize, ky); ctx.stroke();
+        }
+
+        // 中心マーク
+        ctx.strokeStyle = 'rgba(0,255,0,1)';
+        ctx.lineWidth = 4;
+        var crossSize = 30;
+        ctx.beginPath();
+        ctx.moveTo(canvasSize/2 - crossSize, canvasSize/2); ctx.lineTo(canvasSize/2 + crossSize, canvasSize/2);
+        ctx.moveTo(canvasSize/2, canvasSize/2 - crossSize); ctx.lineTo(canvasSize/2, canvasSize/2 + crossSize);
+        ctx.stroke();
+
+        var previewCanvas = document.getElementById('previewCanvas');
+        previewCanvas.width = canvasSize;
+        previewCanvas.height = canvasSize;
+        previewCanvas.getContext('2d').drawImage(canvas, 0, 0);
+        previewCanvas.style.display = 'block';
+
+        var dataUrl = canvas.toDataURL('image/png');
+
+        baseDisplaySize = worldRadius * 2;
+        var entity = document.createElement("a-entity");
+        entity.setAttribute('gps-new-entity-place', { latitude: centerLat, longitude: centerLon });
+
+        planeEl = document.createElement("a-plane");
+        planeEl.setAttribute('geometry', { primitive: 'plane', width: baseDisplaySize, height: baseDisplaySize });
+        planeEl.setAttribute('rotation', '-90 0 0');
+
+        var initialHeight = parseFloat(document.getElementById('heightSlider').value);
+        planeEl.setAttribute('position', '0 ' + initialHeight + ' 0');
+
+        planeEl.setAttribute('material', {
+          shader: 'flat',
+          src: dataUrl,
+          transparent: true,
+          opacity: 0.85,
+          side: 'double'
+        });
+
+        planeEl.addEventListener('materialtextureloaded', function() {
+          log("ヒートマップのテクスチャ読み込み成功", 'info');
+        });
+        planeEl.addEventListener('materialtextureerror', function(e) {
+          log("[テクスチャエラー] " + JSON.stringify(e.detail), 'err');
+        });
+
+        entity.appendChild(planeEl);
+        document.querySelector('a-scene').appendChild(entity);
+        log("ヒートマップパネルをAR空間(頭上・水平)に配置しました（実寸直径" + (baseDisplaySize/1000) + "km）", 'info');
+      });
+    }
+
+    // --- スケール・高さスライダー ---
+    var scaleSlider = document.getElementById('scaleSlider');
+    var heightSlider = document.getElementById('heightSlider');
+    var scaleValueEl = document.getElementById('scaleValue');
+    var heightValueEl = document.getElementById('heightValue');
+
+    function updatePlaneTransform() {
+      if (!planeEl) return;
+      var scale = parseFloat(scaleSlider.value);
+      var height = parseFloat(heightSlider.value);
+      var newSize = baseDisplaySize * scale;
+      planeEl.setAttribute('geometry', { primitive: 'plane', width: newSize, height: newSize });
+      planeEl.object3D.position.set(0, height, 0);
+      scaleValueEl.textContent = scale.toFixed(1);
+      heightValueEl.textContent = height.toFixed(0);
+    }
+    scaleSlider.addEventListener('input', updatePlaneTransform);
+    heightSlider.addEventListener('input', updatePlaneTransform);
+
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      DeviceOrientationEvent.requestPermission().then(function(response) {
+        log("DeviceOrientationEvent permission: " + response);
+        if (response === 'granted') {
+          proceedToAR();
+        } else {
+          log("モーションセンサーの許可が拒否されました", 'err');
+        }
+      }).catch(function(err) {
+        log("[DeviceOrientation permission error] " + err.message, 'err');
+      });
+    } else {
+      proceedToAR();
+    }
+  });
+</script>
+
+</body>
+</html>
